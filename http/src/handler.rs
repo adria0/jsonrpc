@@ -410,7 +410,6 @@ impl<M: Metadata, S: Middleware<M>> RpcHandler<M, S> {
 			}
 			// Respond to Raw API request if there is any configured.
 			Method::GET if self.raw_apis.contains_key(request.uri().path()) => {
-				println!("{:?} --> {:?}",self.raw_apis,request.uri().path());
 				RpcHandlerState::ProcessRaw {
 					metadata,
 					method: self.raw_apis.get(request.uri().path()).unwrap().clone()
@@ -486,7 +485,7 @@ impl<M: Metadata, S: Middleware<M>> RpcHandler<M, S> {
 						_ => serde_json::to_string(&result).expect("Serialization of result is infallible;qed")
 					};
 
-					Response::ok(result)
+					Response::text_plain_ok(result)
 				}
 				Some(core::Response::Single(Output::Failure(Failure { error, .. }))) => {
 					let result = serde_json::to_string(&error).expect("Serialization of error is infallible;qed");

@@ -27,6 +27,14 @@ impl Response {
 			content: response.into(),
 		}
 	}
+	/// Create a text/plain response with given body and 200 OK status code.
+	pub fn text_plain_ok<T: Into<String>>(response: T) -> Self {
+		Response {
+			code: StatusCode::OK,
+			content_type: HeaderValue::from_static("text/plain; charset=utf-8"),
+			content: response.into(),
+		}
+	}
 
 	/// Create a response for plaintext internal error.
 	pub fn internal_error<T: Into<String>>(msg: T) -> Self {
