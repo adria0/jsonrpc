@@ -31,7 +31,9 @@ fn serve<F: FnOnce(ServerBuilder) -> ServerBuilder>(alter: F) -> Server {
 		]))
 		.cors_max_age(None)
 		.rest_api(RestApi::Secure)
-		.health_api(("/health", "hello_async"));
+		.health_api(("/health", "hello_async"))
+		.raw_api(("/raw","raw"))
+		.raw_api(("/another_raw","another_raw"));
 
 	alter(builder).start_http(&"127.0.0.1:0".parse().unwrap()).unwrap()
 }
@@ -57,6 +59,12 @@ fn io() -> IoHandler {
 	io.add_method("hello", |params: Params| match params.parse::<(u64,)>() {
 		Ok((num,)) => Ok(Value::String(format!("world: {}", num))),
 		_ => Ok(Value::String("world".into())),
+	});
+	io.add_method("raw", |_| {
+		Ok(Value::String(String::from("raw string\n")))
+	});
+	io.add_method("another_raw", |_| {
+		Ok(Value::String(String::from("another_raw string\n")))
 	});
 	io.add_method("fail", |_: Params| Err(Error::new(ErrorCode::ServerError(-34))));
 	io.add_method("hello_async", |_params: Params| {
@@ -167,6 +175,72 @@ fn should_handle_health_endpoint_failure() {
 		server,
 		"\
 		 GET /api/health HTTP/1.1\r\n\
+		 Host: 127.0.0.1:8080\r\n\
+		 Connection: close\r\n\
+		 \r\n\
+		 I shouldn't be read.\r\n\
+		 ",
+	);
+
+	// then
+	assert_eq!(response.status, "HTTP/1.1 503 Service Unavailable".to_owned());
+	assert_eq!(response.body, "{\"code\":-34,\"message\":\"Server error\"}\n");
+}
+
+#[test]
+fn should_handle_raw_endpoint() {
+	// given
+	let server = serve(id);
+
+	// when
+	let response = request(
+		server,
+		"\
+		 GET /raw HTTP/1.1\r\n\
+		 Host: 127.0.0.1:8080\r\n\
+		 Connection: close\r\n\
+		 \r\n\
+		 I shouldn't be read.\r\n\
+		 ",
+	);
+
+	// then
+	assert_eq!(response.status, "HTTP/1.1 200 OK".to_owned());
+	assert_eq!(response.body, "raw string\n");
+}
+
+#[test]
+fn should_handle_another_raw_endpoint() {
+	// given
+	let server = serve(id);
+
+	// when
+	let response = request(
+		server,
+		"\
+		 GET /another_raw HTTP/1.1\r\n\
+		 Host: 127.0.0.1:8080\r\n\
+		 Connection: close\r\n\
+		 \r\n\
+		 I shouldn't be read.\r\n\
+		 ",
+	);
+
+	// then
+	assert_eq!(response.status, "HTTP/1.1 200 OK".to_owned());
+	assert_eq!(response.body, "another_raw string\n");
+}
+
+#[test]
+fn should_handle_raw_endpoint_failure() {
+	// given
+	let server = serve(|builder| builder.raw_api(("/api/raw", "fail")));
+
+	// when
+	let response = request(
+		server,
+		"\
+		 GET /api/raw HTTP/1.1\r\n\
 		 Host: 127.0.0.1:8080\r\n\
 		 Connection: close\r\n\
 		 \r\n\

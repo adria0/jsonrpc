@@ -35,6 +35,7 @@ mod response;
 mod tests;
 mod utils;
 
+use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::{mpsc, Arc, Weak};
@@ -242,6 +243,7 @@ pub struct ServerBuilder<M: jsonrpc::Metadata = (), S: jsonrpc::Middleware<M> = 
 	allowed_hosts: AllowedHosts,
 	rest_api: RestApi,
 	health_api: Option<(String, String)>,
+	raw_apis: HashMap<String, String>,
 	keep_alive: bool,
 	threads: usize,
 	max_request_body_size: usize,
@@ -283,6 +285,7 @@ impl<M: jsonrpc::Metadata, S: jsonrpc::Middleware<M>> ServerBuilder<M, S> {
 			allowed_hosts: None,
 			rest_api: RestApi::Disabled,
 			health_api: None,
+			raw_apis: HashMap::new(),
 			keep_alive: true,
 			threads: 1,
 			max_request_body_size: 5 * 1024 * 1024,
@@ -310,7 +313,7 @@ impl<M: jsonrpc::Metadata, S: jsonrpc::Middleware<M>> ServerBuilder<M, S> {
 	///
 	/// Allows you to expose one of the methods under `GET /<path>`
 	/// The method will be invoked with no parameters.
-	/// Error returned from the method will be converted to status `500` response.
+	/// Error returned from the method will be converted to status `503` response.
 	///
 	/// Expects a tuple with `(<path>, <rpc-method-name>)`.
 	pub fn health_api<A, B, T>(mut self, health_api: T) -> Self
@@ -320,6 +323,23 @@ impl<M: jsonrpc::Metadata, S: jsonrpc::Middleware<M>> ServerBuilder<M, S> {
 		B: Into<String>,
 	{
 		self.health_api = health_api.into().map(|(a, b)| (a.into(), b.into()));
+		self
+	}
+
+	/// Add raw api endpoint.
+	///
+	/// Allows you to expose one of the methods under `GET /<path>`
+	/// The method will be invoked with no parameters.
+	/// The result of the call to the method will not be json formatted.
+	/// Error returned from the method will be converted to status `503` response.
+	///
+	/// Expects a tuple with `(<path>, <rpc-method-name>)`.
+	pub fn raw_api<A, B>(mut self, raw_api: (A,B)) -> Self
+	where
+		A: Into<String>,
+		B: Into<String>,
+	{
+		self.raw_apis.insert(raw_api.0.into(),raw_api.1.into());
 		self
 	}
 
@@ -420,6 +440,7 @@ impl<M: jsonrpc::Metadata, S: jsonrpc::Middleware<M>> ServerBuilder<M, S> {
 		};
 		let rest_api = self.rest_api;
 		let health_api = self.health_api;
+		let raw_apis = self.raw_apis;
 		let keep_alive = self.keep_alive;
 		let reuse_port = self.threads > 1;
 
@@ -441,6 +462,7 @@ impl<M: jsonrpc::Metadata, S: jsonrpc::Middleware<M>> ServerBuilder<M, S> {
 			jsonrpc_handler.clone(),
 			rest_api,
 			health_api.clone(),
+			raw_apis.clone(),
 			keep_alive,
 			reuse_port,
 			req_max_size,
@@ -463,6 +485,7 @@ impl<M: jsonrpc::Metadata, S: jsonrpc::Middleware<M>> ServerBuilder<M, S> {
 					jsonrpc_handler.clone(),
 					rest_api,
 					health_api.clone(),
+					raw_apis.clone(),
 					keep_alive,
 					reuse_port,
 					req_max_size,
@@ -521,6 +544,7 @@ fn serve<M: jsonrpc::Metadata, S: jsonrpc::Middleware<M>>(
 	jsonrpc_handler: Rpc<M, S>,
 	rest_api: RestApi,
 	health_api: Option<(String, String)>,
+	raw_apis: HashMap<String,String>,
 	keep_alive: bool,
 	reuse_port: bool,
 	max_request_body_size: usize,
@@ -588,6 +612,7 @@ fn serve<M: jsonrpc::Metadata, S: jsonrpc::Middleware<M>>(
 							request_middleware.clone(),
 							rest_api,
 							health_api.clone(),
+							raw_apis.clone(),
 							max_request_body_size,
 							keep_alive,
 						);

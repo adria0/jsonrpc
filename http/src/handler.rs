@@ -1,5 +1,6 @@
 use crate::WeakRpc;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::{fmt, mem, str};
 
@@ -24,6 +25,7 @@ pub struct ServerHandler<M: Metadata = (), S: Middleware<M> = middleware::Noop> 
 	middleware: Arc<dyn RequestMiddleware>,
 	rest_api: RestApi,
 	health_api: Option<(String, String)>,
+	raw_apis: HashMap<String, String>,
 	max_request_body_size: usize,
 	keep_alive: bool,
 }
@@ -39,6 +41,7 @@ impl<M: Metadata, S: Middleware<M>> ServerHandler<M, S> {
 		middleware: Arc<dyn RequestMiddleware>,
 		rest_api: RestApi,
 		health_api: Option<(String, String)>,
+		raw_apis: HashMap<String, String>,
 		max_request_body_size: usize,
 		keep_alive: bool,
 	) -> Self {
@@ -51,6 +54,7 @@ impl<M: Metadata, S: Middleware<M>> ServerHandler<M, S> {
 			middleware,
 			rest_api,
 			health_api,
+			raw_apis,
 			max_request_body_size,
 			keep_alive,
 		}
@@ -102,6 +106,7 @@ impl<M: Metadata, S: Middleware<M>> Service for ServerHandler<M, S> {
 					cors_allow_headers: cors::AllowCors::NotRequired,
 					rest_api: self.rest_api,
 					health_api: self.health_api.clone(),
+					raw_apis: self.raw_apis.clone(),
 					max_request_body_size: self.max_request_body_size,
 					// initial value, overwritten when reading client headers
 					keep_alive: true,
@@ -189,6 +194,10 @@ where
 		method: String,
 		metadata: M,
 	},
+	ProcessRaw {
+		method: String,
+		metadata: M,
+	},
 	Writing(Response),
 	Waiting(FutureResult<F, G>),
 	WaitingForResponse(FutureResponse<F, G>),
@@ -208,6 +217,7 @@ where
 			ReadingBody { .. } => write!(fmt, "ReadingBody"),
 			ProcessRest { .. } => write!(fmt, "ProcessRest"),
 			ProcessHealth { .. } => write!(fmt, "ProcessHealth"),
+			ProcessRaw { .. } => write!(fmt, "ProcessRaw"),
 			Writing(ref res) => write!(fmt, "Writing({:?})", res),
 			WaitingForResponse(_) => write!(fmt, "WaitingForResponse"),
 			Waiting(_) => write!(fmt, "Waiting"),
@@ -225,6 +235,7 @@ pub struct RpcHandler<M: Metadata, S: Middleware<M>> {
 	cors_max_age: Option<u32>,
 	rest_api: RestApi,
 	health_api: Option<(String, String)>,
+	raw_apis: HashMap<String, String>,
 	max_request_body_size: usize,
 	keep_alive: bool,
 }
@@ -270,6 +281,7 @@ impl<M: Metadata, S: Middleware<M>> Future for RpcHandler<M, S> {
 			},
 			RpcHandlerState::ProcessRest { uri, metadata } => self.process_rest(uri, metadata)?,
 			RpcHandlerState::ProcessHealth { method, metadata } => self.process_health(method, metadata)?,
+			RpcHandlerState::ProcessRaw { method, metadata } => self.process_raw(method, metadata)?,
 			RpcHandlerState::WaitingForResponse(mut waiting) => match waiting.poll() {
 				Ok(Async::Ready(response)) => RpcPollState::Ready(RpcHandlerState::Writing(response)),
 				Ok(Async::NotReady) => RpcPollState::NotReady(RpcHandlerState::WaitingForResponse(waiting)),
@@ -396,6 +408,14 @@ impl<M: Metadata, S: Middleware<M>> RpcHandler<M, S> {
 						.expect("Health api is defined since the URI matched."),
 				}
 			}
+			// Respond to Raw API request if there is any configured.
+			Method::GET if self.raw_apis.contains_key(request.uri().path()) => {
+				println!("{:?} --> {:?}",self.raw_apis,request.uri().path());
+				RpcHandlerState::ProcessRaw {
+					metadata,
+					method: self.raw_apis.get(request.uri().path()).unwrap().clone()
+				}
+			}
 			// Disallow other methods.
 			_ => RpcHandlerState::Writing(Response::method_not_allowed()),
 		}
@@ -425,6 +445,46 @@ impl<M: Metadata, S: Middleware<M>> RpcHandler<M, S> {
 			future::Either::B(response).map(|res| match res {
 				Some(core::Response::Single(Output::Success(Success { result, .. }))) => {
 					let result = serde_json::to_string(&result).expect("Serialization of result is infallible;qed");
+
+					Response::ok(result)
+				}
+				Some(core::Response::Single(Output::Failure(Failure { error, .. }))) => {
+					let result = serde_json::to_string(&error).expect("Serialization of error is infallible;qed");
+
+					Response::service_unavailable(result)
+				}
+				e => Response::internal_error(format!("Invalid response for health request: {:?}", e)),
+			}),
+		)))
+	}
+
+	fn process_raw(
+		&self,
+		method: String,
+		metadata: M,
+	) -> Result<RpcPollState<M, S::Future, S::CallFuture>, hyper::Error> {
+		use self::core::types::{Call, Failure, Id, MethodCall, Output, Params, Request, Success, Version};
+
+		// Create a request
+		let call = Request::Single(Call::MethodCall(MethodCall {
+			jsonrpc: Some(Version::V2),
+			method,
+			params: Params::None,
+			id: Id::Num(1),
+		}));
+
+		let response = match self.jsonrpc_handler.upgrade() {
+			Some(h) => h.handler.handle_rpc_request(call, metadata),
+			None => return Ok(RpcPollState::Ready(RpcHandlerState::Writing(Response::closing()))),
+		};
+
+		Ok(RpcPollState::Ready(RpcHandlerState::WaitingForResponse(
+			future::Either::B(response).map(|res| match res {
+				Some(core::Response::Single(Output::Success(Success { result, .. }))) => {
+					let result = match result {
+						serde_json::Value::String(s) => s,
+						_ => serde_json::to_string(&result).expect("Serialization of result is infallible;qed")
+					};
 
 					Response::ok(result)
 				}
